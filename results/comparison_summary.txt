@@ -1,0 +1,20 @@
+Reference (out-of-distribution) comparison summary
+  k_ref               = 1.032845
+  U-Net k             = 1.035445  |dk| = 2.600670e-03  pcm = 260.1
+  MLP   k             = 1.071838  |dk| = 3.899336e-02  pcm = 3899.3
+  U-Net rel-L2(phi)   = 2.651333e-01
+  MLP   rel-L2(phi)   = 3.474219e-01
+  params(U-Net)       = 830,371
+  params(MLP)         = 637,091
+
+  [U-Net] in-distribution physical-unit metrics
+    split     n  flux rel-L2 mean      med      max   keff pcm mean        med        max
+    train   700            0.1232   0.1153   0.3982           366.3      297.5     1775.1
+    val     150            0.1743   0.1320   1.0506           674.6      505.9     3881.6
+    test    150            0.1541   0.1235   0.7055           659.8      433.2     3379.0
+
+  [MLP] in-distribution physical-unit metrics
+    split     n  flux rel-L2 mean      med      max   keff pcm mean        med        max
+    train   700            0.4307   0.3904   0.9649          2085.2     1813.1    12464.6
+    val     150            0.4515   0.4165   0.9429          2147.6     1580.0    13643.8
+    test    150            0.4258   0.3941   0.9062          2205.3     1771.2    11112.9

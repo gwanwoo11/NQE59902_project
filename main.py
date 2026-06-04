@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as f
-from torch.utils.data import DataLoader, TensorDataset, random_split
+from torch.utils.data import DataLoader, Subset, TensorDataset, random_split
 
 
 @dataclass
@@ -137,12 +137,24 @@ def build_dataloaders(cfg: TrainConfig) -> tuple[DataLoader, DataLoader, DataLoa
         torch.from_numpy(y_n).float(),
         torch.from_numpy(y_keff_n).float(),
     )
-    n_total = len(dataset)
-    n_test = int(n_total * cfg.test_ratio)
-    n_val = int(n_total * cfg.val_ratio)
-    n_train = n_total - n_val - n_test
-    generator = torch.Generator().manual_seed(cfg.seed)
-    train_ds, val_ds, test_ds = random_split(dataset, [n_train, n_val, n_test], generator=generator)
+
+    split_train_path = cfg.data_dir / "split_train.npy"
+    split_val_path = cfg.data_dir / "split_val.npy"
+    split_test_path = cfg.data_dir / "split_test.npy"
+    if split_train_path.exists() and split_val_path.exists() and split_test_path.exists():
+        train_idx = np.load(split_train_path).tolist()
+        val_idx = np.load(split_val_path).tolist()
+        test_idx = np.load(split_test_path).tolist()
+        train_ds = Subset(dataset, train_idx)
+        val_ds = Subset(dataset, val_idx)
+        test_ds = Subset(dataset, test_idx)
+    else:
+        n_total = len(dataset)
+        n_test = int(n_total * cfg.test_ratio)
+        n_val = int(n_total * cfg.val_ratio)
+        n_train = n_total - n_val - n_test
+        generator = torch.Generator().manual_seed(cfg.seed)
+        train_ds, val_ds, test_ds = random_split(dataset, [n_train, n_val, n_test], generator=generator)
 
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False)
@@ -174,6 +186,64 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, keff_we
             total_keff += loss_keff.item()
             n_batches += 1
     return total_loss / n_batches, total_flux / n_batches, total_keff / n_batches
+
+
+def evaluate_physical(model: nn.Module, loader: DataLoader, device: torch.device, norm: dict[str, np.ndarray]) -> dict[str, float]:
+    """Per-sample rel-L2(flux) and |dk_eff| (pcm) after denormalizing to physical units."""
+    y_mean = torch.from_numpy(norm["y_mean"]).float().to(device)
+    y_std = torch.from_numpy(norm["y_std"]).float().to(device)
+    k_mean = float(norm["k_mean"][0])
+    k_std = float(norm["k_std"][0])
+
+    rel_l2_list: list[float] = []
+    abs_dk_list: list[float] = []
+    model.eval()
+    with torch.no_grad():
+        for x_b, y_flux_n, y_keff_n in loader:
+            x_b = x_b.to(device)
+            y_flux_n = y_flux_n.to(device)
+            y_keff_n = y_keff_n.to(device)
+            pred_flux_n, pred_keff_n = model(x_b)
+
+            pred_flux = pred_flux_n * y_std + y_mean
+            true_flux = y_flux_n * y_std + y_mean
+            diff = (pred_flux - true_flux).reshape(pred_flux.size(0), -1)
+            truth = true_flux.reshape(true_flux.size(0), -1)
+            sample_rel = diff.norm(dim=1) / (truth.norm(dim=1) + 1.0e-20)
+            rel_l2_list.extend(sample_rel.cpu().tolist())
+
+            pred_k = pred_keff_n.cpu().numpy() * k_std + k_mean
+            true_k = y_keff_n.cpu().numpy() * k_std + k_mean
+            abs_dk_list.extend(np.abs(pred_k - true_k).tolist())
+
+    rel = np.asarray(rel_l2_list)
+    dk = np.asarray(abs_dk_list)
+    return {
+        "n_samples": int(rel.size),
+        "flux_rel_l2_mean": float(rel.mean()),
+        "flux_rel_l2_median": float(np.median(rel)),
+        "flux_rel_l2_max": float(rel.max()),
+        "keff_pcm_mean": float(dk.mean() * 1.0e5),
+        "keff_pcm_median": float(np.median(dk) * 1.0e5),
+        "keff_pcm_max": float(dk.max() * 1.0e5),
+    }
+
+
+def report_split_metrics(model: nn.Module, cfg: "TrainConfig", label: str = "") -> dict[str, dict[str, float]]:
+    """Build loaders deterministically, run evaluate_physical on each split, and print a table."""
+    train_loader, val_loader, test_loader, norm = build_dataloaders(cfg)
+    device = next(model.parameters()).device
+    out: dict[str, dict[str, float]] = {}
+    prefix = f"[{label}] " if label else ""
+    for name, loader in [("train", train_loader), ("val", val_loader), ("test", test_loader)]:
+        m = evaluate_physical(model, loader, device, norm)
+        out[name] = m
+        print(
+            f"{prefix}{name:5s} n={int(m['n_samples']):4d}  "
+            f"flux rel-L2 mean={m['flux_rel_l2_mean']:.4f} med={m['flux_rel_l2_median']:.4f} max={m['flux_rel_l2_max']:.4f}  "
+            f"keff pcm mean={m['keff_pcm_mean']:8.1f} med={m['keff_pcm_median']:8.1f} max={m['keff_pcm_max']:8.1f}"
+        )
+    return out
 
 
 def train_model(cfg: TrainConfig) -> tuple[TinyUNet, dict[str, np.ndarray], dict[str, list[float]]]:
@@ -284,10 +354,12 @@ def save_plots(cfg: TrainConfig, history: dict[str, list[float]], ref_true: np.n
 def main() -> None:
     cfg = TrainConfig()
     model, norm, history = train_model(cfg)
+    print("\n--- in-distribution metrics in physical units ---")
+    report_split_metrics(model, cfg, label="UNet")
     ref_true, ref_pred, k_ref, k_pred = infer_reference_case(model, norm, cfg.data_dir)
     rel_l2 = np.linalg.norm(ref_pred - ref_true) / (np.linalg.norm(ref_true) + 1.0e-20)
-    print(f"reference keff true={k_ref:.6f}, pred={k_pred:.6f}, abs={abs(k_pred-k_ref):.6e}")
-    print(f"reference flux relative L2 error={rel_l2:.6e}")
+    print(f"\nreference (OOD) keff true={k_ref:.6f}, pred={k_pred:.6f}, abs={abs(k_pred-k_ref):.6e} ({abs(k_pred-k_ref)*1e5:.1f} pcm)")
+    print(f"reference (OOD) flux relative L2 error={rel_l2:.6e}")
     save_plots(cfg, history, ref_true, ref_pred, k_ref, k_pred)
     print(f"saved outputs in: {cfg.out_dir}")
 
