@@ -1,13 +1,30 @@
 """IAEA 2D PWR quarter-core reference (numpy-only, simple arrays).
 
 This file stores:
-1) A coarse material loading map inferred from the provided figure.
-2) Two-group cross sections from the provided table.
+1) A coarse material loading map for the IAEA-2D quarter core.
+2) Two-group cross sections (canonical IAEA-2D values; see validation note).
 
 Note:
-- The loading map here is a practical starter representation for coding.
-- Replace `MATERIAL_MAP_COARSE` with the official map once the exact dataset
-  geometry is fully confirmed.
+- The two-group XS below match the canonical IAEA-2D benchmark exactly
+  (arXiv:2208.13483 Table III); reference k_eff ~= 1.0296.
+- `MATERIAL_MAP_COARSE` was reconstructed (2026-06) from the external IAEA-2D
+  reference flux fields in `2d_IAEA/` by inverting the source-free group-2
+  diffusion balance, Sigma_a2 = (Sigma_s12*phi1 + D2*lap(phi2)) / phi2, for the
+  per-assembly Sigma_a2, then enforcing diagonal (quarter-core) symmetry. Versus
+  the earlier hand-drawn starter map this fixed three diagonal-symmetry
+  violations (pairs [2,6]/[6,2], [3,7]/[7,3], [4,8]/[8,4]). When the recovery is
+  aligned to the correct half-width symmetry-boundary mesh (see below), the four
+  control rods at [0,0], [0,4], [4,0], [4,4] all recover cleanly at Sigma_a2 ~=
+  0.130. See `reconstruct_material_map.py` and `validate_against_reference.py`.
+
+GEOMETRY NOTE (open issue): the IAEA-2D quarter core has HALF-width assemblies
+  on the two reflective (symmetry) edges and a QUARTER assembly at the [0,0]
+  corner, because the full core is odd-by-odd and the centre row/column are
+  shared. `diffusion_solver.py` currently uses a UNIFORM mesh (every map cell =
+  full 20 cm), which over-sizes the central region and flattens the radial power
+  (~28% L2 vs the reference). Modelling the half/quarter boundary cells
+  collapses that error to ~1.6%. Fixing it requires a non-uniform mesh in the
+  solver (and regenerating the training data).
 """
 
 from __future__ import annotations
@@ -34,28 +51,29 @@ MATERIAL_NAMES = {
 
 
 # -----------------------------------------------------------------------------
-# Coarse loading pattern (top row -> bottom row)
+# Coarse loading pattern (top row -> bottom row), reconstructed from the
+# 2d_IAEA/ reference and symmetrised. [0,0] is the core centre (reflective/
+# reflective corner); the far bottom-right is the vacuum corner.
 # -----------------------------------------------------------------------------
-# This is a simple integer map approximating the provided quarter-core figure.
-# Teal region in the figure is treated as OUTSIDE for now.
-#
-# Legend:
-#   0: Outside (teal-like area in the screenshot)
-#   1: Fuel1 (green)
-#   2: Fuel1+Rod (black)
-#   3: Fuel2 (blue)
-#   4: Reflector (orange)
+# Legend (id -> repo name -> canonical IAEA-2D region, Sigma_a2):
+#   0: Outside   (excluded from the solve, phi=0)
+#   1: Fuel1     -> canonical Omega2,      Sigma_a2 = 0.085
+#   2: Fuel1+Rod -> canonical Omega3 (rod), Sigma_a2 = 0.130
+#   3: Fuel2     -> canonical Omega1,      Sigma_a2 = 0.080
+#   4: Reflector -> canonical Omega4,      Sigma_a2 = 0.010
+# (repo Fuel1/Fuel2 naming is swapped vs the canonical Omega1/Omega2 labels;
+#  the XS *values* per id are correct -- see SIGMA_A below.)
 MATERIAL_MAP_COARSE = np.array(
     [
         [2, 1, 1, 1, 2, 1, 1, 3, 4],
         [1, 1, 1, 1, 1, 1, 1, 3, 4],
-        [1, 1, 1, 1, 1, 1, 1, 3, 4],
         [1, 1, 1, 1, 1, 1, 3, 3, 4],
+        [1, 1, 1, 1, 1, 1, 3, 4, 4],
         [2, 1, 1, 1, 2, 3, 3, 4, 4],
         [1, 1, 1, 1, 3, 3, 4, 4, 0],
         [1, 1, 3, 3, 3, 4, 4, 0, 0],
         [3, 3, 3, 4, 4, 4, 0, 0, 0],
-        [4, 4, 4, 4, 0, 0, 0, 0, 0],
+        [4, 4, 4, 4, 4, 0, 0, 0, 0],
     ],
     dtype=np.int64,
 )

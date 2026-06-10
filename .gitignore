@@ -1,3 +1,6 @@
 __pycache__/
 train_data/
 CLAUDE.md
+.claude/
+claude/
+2d_IAEA/
